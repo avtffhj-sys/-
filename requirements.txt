@@ -4,3 +4,4 @@ requests
 flask
 gunicorn
 flask-cors
+anthropic
