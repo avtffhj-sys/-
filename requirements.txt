@@ -1,7 +1,4 @@
-fastapi
-uvicorn
-requests
 flask
-gunicorn
 flask-cors
-anthropic
+requests
+gunicorn
