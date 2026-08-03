@@ -3,8 +3,14 @@
 fatwa_api_server.py
 --------------------
 خادم خلفي بسيط بلغة Python/Flask يعمل كوسيط آمن بين صفحة الموقع (index.html)
-وواجهة Claude API من Anthropic. الغرض منه إبقاء مفتاح API سرًا على الخادم
-بدلًا من كشفه داخل كود المتصفح.
+وواجهة OpenRouter (بدل Anthropic مباشرة). الغرض منه إبقاء مفتاح API سرًا على
+الخادم بدلًا من كشفه داخل كود المتصفح.
+
+** تحديث: تم تحويل الخادم للعمل عبر OpenRouter بدل Anthropic **
+OpenRouter بيدّيك وصول لموديلات كتير (من ضمنها موديلات مجانية) عبر واجهة
+واحدة متوافقة مع صيغة OpenAI، فمش محتاج مكتبة anthropic ولا مفتاح Anthropic
+خالص. تقدر تختار أي موديل من https://openrouter.ai/models (فلتر Free
+للموديلات المجانية).
 
 يوفر نقطتي وصول (endpoints):
   POST /api/fatwa    -> يُستخدم من قسم "الفتاوى" (بحث ذكي فوري)
@@ -12,7 +18,7 @@ fatwa_api_server.py
 
 طريقة التشغيل:
   1) pip install -r requirements.txt
-  2) عيّن مفتاح Anthropic الخاص بك كمتغير بيئة (انظر ملف .env.example)
+  2) عيّن مفتاح OpenRouter كمتغير بيئة OPENROUTER_API_KEY (انظر ملف .env.example)
   3) python fatwa_api_server.py
   الخادم سيعمل افتراضيًا على http://localhost:5000
 """
@@ -21,15 +27,24 @@ import os
 import re
 import json
 
+import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from anthropic import Anthropic, APIError, APIConnectionError
 
 # ============================================================
 # الإعدادات
 # ============================================================
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-MODEL_NAME = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
+
+# اختر أي موديل من https://openrouter.ai/models
+# الموديلات المنتهية بـ ":free" مجانية تمامًا لكن بحدود طلبات صارمة.
+MODEL_NAME = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# اختياري لكن موصى به من OpenRouter (يظهر في لوحة تحكمهم فقط، لا يؤثر وظيفيًا)
+SITE_URL = os.environ.get("SITE_URL", "").strip()
+SITE_NAME = os.environ.get("SITE_NAME", "").strip()
 
 app = Flask(__name__)
 
@@ -40,7 +55,7 @@ app = Flask(__name__)
 # في الإنتاج (سيرفر مجاني)، عيّن متغير البيئة ALLOWED_ORIGINS بنطاق
 # موقعك الفعلي (مفصول بفواصل إن وجد أكثر من نطاق)، مثال:
 #   ALLOWED_ORIGINS=https://your-site.pages.dev,https://yourdomain.com
-# هذا يمنع أي موقع آخر من استخدام خادمك ومفتاح Claude الخاص بك.
+# هذا يمنع أي موقع آخر من استخدام خادمك ومفتاح OpenRouter الخاص بك.
 # ============================================================
 _allowed_origins_env = os.environ.get("ALLOWED_ORIGINS", "").strip()
 if _allowed_origins_env:
@@ -48,8 +63,6 @@ if _allowed_origins_env:
     CORS(app, origins=ALLOWED_ORIGINS)
 else:
     CORS(app)  # وضع التطوير المحلي: يسمح لأي نطاق (غير موصى به في الإنتاج)
-
-client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 
 # ============================================================
@@ -74,19 +87,47 @@ MURSHID_SYSTEM_PROMPT = """أنت "مرشد"، مساعد إسلامي يجيب 
 أجب بنص عادي دون Markdown ودون تنسيق زائد، بحد أقصى فقرة أو فقرتين."""
 
 
-def call_claude(system_prompt, user_question, max_tokens=1000):
-    """ينادي Claude API ويعيد النص الكامل للإجابة."""
-    if client is None:
+def call_llm(system_prompt, user_question, max_tokens=1000):
+    """ينادي نموذج اللغة عبر OpenRouter ويعيد النص الكامل للإجابة."""
+    if not OPENROUTER_API_KEY:
         raise RuntimeError("missing_api_key")
 
-    response = client.messages.create(
-        model=MODEL_NAME,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_question}],
-    )
-    text_parts = [block.text for block in response.content if block.type == "text"]
-    return "\n".join(text_parts).strip()
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    # الترويسات التالية اختيارية (لإحصائيات OpenRouter فقط) لكن لا ضرر منها
+    if SITE_URL:
+        headers["HTTP-Referer"] = SITE_URL
+    if SITE_NAME:
+        headers["X-Title"] = SITE_NAME
+
+    payload = {
+        "model": MODEL_NAME,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_question},
+        ],
+    }
+
+    try:
+        resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=60)
+    except requests.RequestException as e:
+        raise ConnectionError(str(e))
+
+    if resp.status_code >= 400:
+        # نسجل نص الخطأ الكامل في اللوج للمساعدة على التشخيص، لكن لا نكشفه للمستخدم
+        app.logger.error("OpenRouter API error (%s): %s", resp.status_code, resp.text[:500])
+        raise RuntimeError("upstream_error")
+
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("upstream_error")
+
+    content = (choices[0].get("message") or {}).get("content") or ""
+    return content.strip()
 
 
 def extract_json(raw_text):
@@ -114,7 +155,7 @@ def api_fatwa():
         return jsonify({"error": "empty_question"}), 400
 
     try:
-        raw = call_claude(AI_FATWA_SYSTEM_PROMPT, question, max_tokens=1200)
+        raw = call_llm(AI_FATWA_SYSTEM_PROMPT, question, max_tokens=1200)
         if not raw:
             return jsonify({"error": "empty_model_response"}), 502
         parsed = extract_json(raw)
@@ -125,10 +166,10 @@ def api_fatwa():
         return jsonify({"error": "upstream_error"}), 502
     except json.JSONDecodeError:
         return jsonify({"error": "invalid_model_output"}), 502
-    except (APIError, APIConnectionError) as e:
-        app.logger.error("Anthropic API error: %s", e)
+    except ConnectionError as e:
+        app.logger.error("OpenRouter connection error: %s", e)
         return jsonify({"error": "upstream_error"}), 502
-    except Exception as e:  # حماية عامة من أي خطأ غير متوقع
+    except Exception:  # حماية عامة من أي خطأ غير متوقع
         app.logger.exception("Unexpected error in /api/fatwa")
         return jsonify({"error": "upstream_error"}), 502
 
@@ -145,7 +186,7 @@ def api_murshid():
         return jsonify({"error": "empty_question"}), 400
 
     try:
-        answer = call_claude(system_prompt, question, max_tokens=800)
+        answer = call_llm(system_prompt, question, max_tokens=800)
         if not answer:
             return jsonify({"error": "empty_model_response"}), 502
         return jsonify({"answer": answer})
@@ -153,8 +194,8 @@ def api_murshid():
         if str(e) == "missing_api_key":
             return jsonify({"error": "missing_api_key"}), 500
         return jsonify({"error": "upstream_error"}), 502
-    except (APIError, APIConnectionError) as e:
-        app.logger.error("Anthropic API error: %s", e)
+    except ConnectionError as e:
+        app.logger.error("OpenRouter connection error: %s", e)
         return jsonify({"error": "upstream_error"}), 502
     except Exception:
         app.logger.exception("Unexpected error in /api/murshid")
@@ -163,14 +204,14 @@ def api_murshid():
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "has_api_key": bool(ANTHROPIC_API_KEY), "model": MODEL_NAME})
+    return jsonify({"status": "ok", "has_api_key": bool(OPENROUTER_API_KEY), "model": MODEL_NAME})
 
 
 if __name__ == "__main__":
-    if not ANTHROPIC_API_KEY:
-        print("تحذير: لم يتم العثور على متغير البيئة ANTHROPIC_API_KEY.")
-        print("عيّنه أولًا، مثال على لينكس/ماك:  export ANTHROPIC_API_KEY=sk-ant-...")
-        print("أو على ويندوز (PowerShell):      $env:ANTHROPIC_API_KEY='sk-ant-...'")
+    if not OPENROUTER_API_KEY:
+        print("تحذير: لم يتم العثور على متغير البيئة OPENROUTER_API_KEY.")
+        print("عيّنه أولًا، مثال على لينكس/ماك:  export OPENROUTER_API_KEY=sk-or-...")
+        print("أو على ويندوز (PowerShell):      $env:OPENROUTER_API_KEY='sk-or-...'")
     # PORT: تحدده منصات الاستضافة المجانية (Render, Railway...) تلقائيًا عبر
     # متغير بيئة، لذا نقرأه بدل تثبيت 5000. محليًا سيبقى 5000 كما هو.
     port = int(os.environ.get("PORT", 5000))
