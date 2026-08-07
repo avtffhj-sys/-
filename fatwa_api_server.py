@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-fatwa_api_server_with_push.py
+fatwa_api_server.py
 ------------------------------
 نسخة مدمجة من خادمك الحالي (fatwa_api_server.py) + إشعارات الدفع
 (push_notifications_backend.py)، مع فارق واحد مهم: الاشتراكات تُخزَّن
 الآن في Supabase (قاعدة بيانات دائمة) بدل ملف JSON محلي، لأن التخزين
 المحلي على Render يُمسح عند كل إعادة نشر/إعادة تشغيل.
 
-استبدل ملف fatwa_api_server.py الحالي بهذا الملف (أو انسخ منه الأجزاء
-الخاصة بـ push فقط إن كنت تفضّل الإبقاء على ملفك كما هو).
+[تعديل] أُضيف تسجيل تفصيلي (logging) لأي خطأ يحدث أثناء إرسال إشعار
+push عبر webpush()، لتشخيص أسباب الفشل الحقيقية بدل تجاهلها بصمت.
 
 الإضافات المطلوبة على requirements.txt:
     supabase
@@ -273,12 +273,25 @@ def push_broadcast():
             sent += 1
         except WebPushException as ex:
             status_code = getattr(ex.response, "status_code", None)
+            response_text = getattr(ex.response, "text", None)
+            # [تعديل] تسجيل تفصيلي لمعرفة سبب فشل الإرسال الحقيقي
+            app.logger.error(
+                "webpush failed: endpoint=%s status=%s body=%s error=%s",
+                row.get("endpoint", "")[:80], status_code, response_text, str(ex)
+            )
             if status_code in (404, 410):
                 # الاشتراك لم يعد صالحًا (المستخدم ألغى الإذن أو أزال المتصفح)
                 expired_endpoints.append(row["endpoint"])
                 removed += 1
             else:
                 failed += 1
+        except Exception as ex:
+            # [تعديل] التقاط أي خطأ آخر غير متوقع (مثل مشاكل في مفتاح VAPID نفسه)
+            app.logger.exception(
+                "webpush unexpected error for endpoint=%s: %s",
+                row.get("endpoint", "")[:80], str(ex)
+            )
+            failed += 1
 
     if expired_endpoints:
         try:
