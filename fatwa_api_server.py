@@ -66,7 +66,7 @@ if SUPABASE_URL and SUPABASE_SERVICE_KEY:
 PUSH_TABLE = "push_subscriptions"
 
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
-VAPID_CLAIMS = {"sub": "mailto:you@example.com"}  # عدّل البريد إلى بريدك الفعلي
+VAPID_CLAIMS = {"sub": "mailto:avtffhg@gmail.com"}
 
 
 # ============================================================
@@ -279,8 +279,11 @@ def push_broadcast():
                 "webpush failed: endpoint=%s status=%s body=%s error=%s",
                 row.get("endpoint", "")[:80], status_code, response_text, str(ex)
             )
-            if status_code in (404, 410):
-                # الاشتراك لم يعد صالحًا (المستخدم ألغى الإذن أو أزال المتصفح)
+            if status_code in (404, 410, 403):
+                # 404/410: الاشتراك لم يعد صالحًا (المستخدم ألغى الإذن أو أزال المتصفح)
+                # 403: الاشتراك مربوط بمفتاح VAPID قديم مختلف عن المفتاح الحالي —
+                # لن ينجح إرساله أبدًا حتى يعيد المستخدم الاشتراك من الفرونت-إند،
+                # لذا نحذفه بدل تكرار عدّه "فشل" في كل بث قادم
                 expired_endpoints.append(row["endpoint"])
                 removed += 1
             else:
